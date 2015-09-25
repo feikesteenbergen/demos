@@ -2,7 +2,7 @@
 -- to enable access to the variable from inside the backticks
 \setenv PSQLLOADFILE :variables_file
 -- Load the full file into a variable
-\set filecontents `type "%PSQLLOADFILE%`
+\set filecontents `type "%PSQLLOADFILE%"`
 -- Disable output, as not to clutter the console output
 \o NUL
 SELECT array_to_string(array_agg(format('%L', field)), ',') AS :"variables_target",
