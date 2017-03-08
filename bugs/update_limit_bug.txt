@@ -1,0 +1,43 @@
+DROP TABLE IF EXISTS buganalysis;
+DROP TABLE
+CREATE TABLE buganalysis (
+    id serial primary key,
+    created timestamptz not null default clock_timestamp()
+);
+CREATE TABLE
+CREATE INDEX ON buganalysis(created);
+CREATE INDEX
+INSERT INTO buganalysis SELECT;
+INSERT 0 1
+VACUUM ANALYZE buganalysis;
+VACUUM
+INSERT INTO buganalysis SELECT FROM generate_series(1,10);
+INSERT 0 10
+EXPLAIN (ANALYZE)
+    UPDATE buganalysis
+       SET created=clock_timestamp()
+      FROM (    SELECT id
+                  FROM buganalysis
+                 WHERE id % 2 = 0
+              ORDER BY created
+                   FOR UPDATE SKIP LOCKED
+                 LIMIT 2
+            ) AS sub
+     WHERE buganalysis.id = sub.id
+ RETURNING *;
+                                                                       QUERY PLAN
+--------------------------------------------------------------------------------------------------------------------------------------------------------
+ Update on buganalysis  (cost=1.02..2.07 rows=1 width=50) (actual time=0.073..0.118 rows=5 loops=1)
+   ->  Nested Loop  (cost=1.02..2.07 rows=1 width=50) (actual time=0.056..0.088 rows=5 loops=1)
+         Join Filter: (buganalysis.id = sub.id)
+         Rows Removed by Join Filter: 13
+         ->  Seq Scan on buganalysis  (cost=0.00..1.01 rows=1 width=10) (actual time=0.006..0.009 rows=11 loops=1)
+         ->  Subquery Scan on sub  (cost=1.02..1.05 rows=1 width=32) (actual time=0.005..0.006 rows=2 loops=11)
+               ->  Limit  (cost=1.02..1.04 rows=1 width=18) (actual time=0.004..0.005 rows=2 loops=11)
+                     ->  LockRows  (cost=1.02..1.04 rows=1 width=18) (actual time=0.003..0.004 rows=2 loops=11)
+                           ->  Sort  (cost=1.02..1.03 rows=1 width=18) (actual time=0.001..0.002 rows=4 loops=11)
+                                 Sort Key: buganalysis_1.created
+                                 Sort Method: quicksort  Memory: 25kB
+                                 ->  Seq Scan on buganalysis buganalysis_1  (cost=0.00..1.01 rows=1 width=18) (actual time=0.003..0.005 rows=5 loops=1)
+                                       Filter: ((id % 2) = 0)
+                                       Rows Removed by Filter: 6
