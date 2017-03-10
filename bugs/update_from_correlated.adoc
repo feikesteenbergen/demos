@@ -1,0 +1,226 @@
+# The problem
+We received reports that applications were receiving more rows than they
+wanted.
+
+# Implementation
+We use a query that has the following form, which is inspired by
+http://dba.stackexchange.com/a/69497/56047[this stackexchange answer]
+
+This is the example query where we can reproduce the issue:
+
+[source,sql]
+----
+   UPDATE buganalysis
+      SET id=0
+     FROM ( SELECT id
+              FROM buganalysis
+             WHERE id % 2 = 0
+               FOR UPDATE SKIP LOCKED
+             LIMIT 2
+            ) AS mysub
+    WHERE buganalysis.id = mysub.id
+RETURNING *;
+----
+
+# Analysis
+We assume this query to return *at most* 2 rows, as we specifically say `LIMIT
+2`. When reports came in of people receiving more than these 2 rows, we started
+to investigate.
+
+We used
+https://www.postgresql.org/docs/current/static/auto-explain.html[auto_explain]
+to verify whether or not the issue was with the query. We added this to the
+configuration and reloaded the postmaster.
+
+[source,postgresql.conf]
+----
+session_preload_libraries = 'auto_explain'
+auto_explain.log_analyze = 'on'
+auto_explain.log_min_duration = 0
+----
+WARNING: By enabling the following setting we were explaining analyzing *all*
+our queries on the system for new connections. This will have impact on your
+performance and causes a lot of log output to be generated. I would advice not
+to enable this for long with these settings.
+
+Within a few minutes we had evidence of the problem being with this SQL query,
+specifically more rows were updated than we specified in the `LIMIT` clause.
+
+# Reproduce
+We can reproduce the issue with the following schema:
+
+[source,sql]
+----
+DROP TABLE IF EXISTS buganalysis;
+CREATE TABLE buganalysis (
+    id serial PRIMARY KEY
+);
+
+-- We insert a single row, and make sure the statistics are updated
+INSERT INTO buganalysis SELECT;
+VACUUM ANALYZE buganalysis;
+
+-- Autovacuum normally is only triggered after a minimum of 50 tuples changed
+-- we therefore insert less than 50
+INSERT INTO buganalysis SELECT FROM generate_series(1,40);
+----
+
+We `EXPLAIN ANALYZE` the query:
+
+[source,sql]
+----
+EXPLAIN ANALYZE
+   UPDATE buganalysis
+      SET id=mysub.id
+     FROM ( SELECT id
+              FROM buganalysis
+             WHERE id % 2 = 0
+               FOR UPDATE SKIP LOCKED
+             LIMIT 2
+            ) AS mysub
+    WHERE buganalysis.id = mysub.id
+RETURNING *;
+----
+
+[source,explain,options="nowrap"]
+----
+                                                                     QUERY PLAN
+----------------------------------------------------------------------------------------------------------------------------------------------------
+ Update on buganalysis  (cost=0.00..2.06 rows=1 width=38) (actual time=0.049..0.529 rows=20 loops=1)
+   ->  Nested Loop  (cost=0.00..2.06 rows=1 width=38) (actual time=0.042..0.498 rows=20 loops=1)
+         Join Filter: (buganalysis.id = mysub.id)
+         Rows Removed by Join Filter: 58
+         ->  Seq Scan on buganalysis  (cost=0.00..1.01 rows=1 width=10) (actual time=0.012..0.016 rows=41 loops=1)
+         ->  Subquery Scan on mysub  (cost=0.00..1.03 rows=1 width=32) (actual time=0.009..0.011 rows=2 loops=41)
+               ->  Limit  (cost=0.00..1.02 rows=1 width=10) (actual time=0.008..0.010 rows=2 loops=41)
+                     ->  LockRows  (cost=0.00..1.02 rows=1 width=10) (actual time=0.008..0.010 rows=2 loops=41)
+                           ->  Seq Scan on buganalysis buganalysis_1  (cost=0.00..1.01 rows=1 width=10) (actual time=0.002..0.006 rows=12 loops=41)
+                                 Filter: ((id % 2) = 0)
+                                 Rows Removed by Filter: 12
+----
+
+* There were actually 20 rows updated, the `LIMIT 2` was not applied to the full resultset: +
+`Update on buganalysis  (...) (actual time=0.049..0.529 *rows=20* loops=1)`
+* The `LIMIT` is applied to the subquery however: +
+`Limit  (...) (actual time=0.008..0.010 *rows=2* loops=1)`
+* The subquery mysub is however itself executed 41 times: +
+`Subquery Scan on mysub  (...) (actual time=0.009..0.011 rows=2 *loops=41*)`
+
+
+# Explanation
+The `mysub` subquery is part of a join against the `buganalysis` table. The
+planner has many options to join these two relations. When it chooses a
+`Hash Join` or `Merge Join` the `mysub` subquery will only be executed once.
+
+However, if the planner deems the `Nested Loop` to be the optimal plan to
+execute this query, it will execute the `mysub` subquery as many times as there
+are rows in the buganalysis table. A `Nested Loop` join will be considered the
+cheapest option if there is only a very few rows expected. This is exactly the
+case here, it only expects *1 row* however there are actually *41 rows*;
+
+`Seq Scan on buganalysis  (... *rows=1* ...) (... *rows=41* ...)`
+
+As the mysub subquery will be returning different rows for every iteration (it
+will skip the rows that were locked in the previous iteration) this may cause
+the update to do more work than we want.
+
+To verify this, we repeate the query after updating the statistics:
+[source,sql]
+----
+ANALYZE buganalysis;
+
+EXPLAIN ANALYZE
+   UPDATE buganalysis
+      SET id=mysub.id
+     FROM ( SELECT id
+              FROM buganalysis
+             WHERE id % 2 = 0
+               FOR UPDATE SKIP LOCKED
+             LIMIT 2
+            ) AS mysub
+    WHERE buganalysis.id = mysub.id
+RETURNING *;
+----
+[source,explain,options="nowrap"]
+----
+                                                                       QUERY PLAN
+--------------------------------------------------------------------------------------------------------------------------------------------------------
+ Update on buganalysis  (cost=1.65..3.22 rows=1 width=38) (actual time=0.086..0.098 rows=2 loops=1)
+   ->  Hash Join  (cost=1.65..3.22 rows=1 width=38) (actual time=0.075..0.085 rows=2 loops=1)
+         Hash Cond: (buganalysis.id = mysub.id)
+         ->  Seq Scan on buganalysis  (cost=0.00..1.41 rows=41 width=10) (actual time=0.008..0.017 rows=41 loops=1)
+         ->  Hash  (cost=1.64..1.64 rows=1 width=32) (actual time=0.050..0.050 rows=2 loops=1)
+               Buckets: 1024  Batches: 1  Memory Usage: 9kB
+               ->  Subquery Scan on mysub  (cost=0.00..1.64 rows=1 width=32) (actual time=0.042..0.046 rows=2 loops=1)
+                     ->  Limit  (cost=0.00..1.62 rows=1 width=10) (actual time=0.036..0.039 rows=2 loops=1)
+                           ->  LockRows  (cost=0.00..1.62 rows=1 width=10) (actual time=0.035..0.038 rows=2 loops=1)
+                                 ->  Seq Scan on buganalysis buganalysis_1  (cost=0.00..1.61 rows=1 width=10) (actual time=0.009..0.010 rows=2 loops=1)
+                                       Filter: ((id % 2) = 0)
+                                       Rows Removed by Filter: 21
+----
+
+* There were actually 2 rows updated: +
+`Update on buganalysis  (...) (actual time=0.086..0.098 *rows=2* loops=1)`
+* The subquery mysub is however itself executed only once: +
+`Subquery Scan on mysub  (...) (actual time=0.042..0.046 rows=2 *loops=1*)`
+
+This means that the behaviour of having more rows returned than specified in
+the `LIMIT` clause need a combination of things to be true:
+
+* The Planner must deem the `Nested Loop` join to be the most efficient.
+* Only for a very small amount of rows will this be the case
+* The actual number of rows matching the `WHERE` clause will need to be more than the `LIMIT` clause
+
+# Solution
+We can solve this unwanted behaviour by forcing the mysub subquery to be only
+executed once. We can to this by relying on an implementation detail of
+https://www.postgresql.org/docs/current/static/queries-with.html[Common Table Expressions] (CTE):
+[quote, PostgreSQL Documentation, WITH Queries (Common Table Expressions)]
+----
+Another possible application is to prevent unwanted multiple evaluations of functions with side-effects.
+----
+
+We do this by moving the subquery into its own CTE:
+
+[source,sql]
+----
+EXPLAIN ANALYZE
+WITH mysub AS (
+    SELECT id
+      FROM buganalysis
+     WHERE id % 2 = 0
+       FOR UPDATE SKIP LOCKED
+     LIMIT 2
+)
+   UPDATE buganalysis
+      SET id=mysub.id
+     FROM mysub
+    WHERE buganalysis.id = mysub.id
+RETURNING *;
+----
+
+[source,explain,options="nowrap"]
+----
+                                                               QUERY PLAN
+----------------------------------------------------------------------------------------------------------------------------------------
+ Update on buganalysis  (cost=1.02..2.07 rows=1 width=38) (actual time=0.041..0.093 rows=2 loops=1)
+   CTE mysub
+     ->  Limit  (cost=0.00..1.02 rows=1 width=10) (actual time=0.014..0.016 rows=2 loops=1)
+           ->  LockRows  (cost=0.00..1.02 rows=1 width=10) (actual time=0.013..0.014 rows=2 loops=1)
+                 ->  Seq Scan on buganalysis buganalysis_1  (cost=0.00..1.01 rows=1 width=10) (actual time=0.004..0.005 rows=2 loops=1)
+                       Filter: ((id % 2) = 0)
+                       Rows Removed by Filter: 2
+   ->  Nested Loop  (cost=0.00..1.04 rows=1 width=38) (actual time=0.034..0.083 rows=2 loops=1)
+         Join Filter: (buganalysis.id = mysub.id)
+         Rows Removed by Join Filter: 80
+         ->  Seq Scan on buganalysis  (cost=0.00..1.01 rows=1 width=10) (actual time=0.008..0.013 rows=41 loops=1)
+         ->  CTE Scan on mysub  (cost=0.00..0.02 rows=1 width=32) (actual time=0.001..0.001 rows=2 loops=41)
+----
+
+* There were actually 2 rows updated: +
+`Update on buganalysis  (...) (actual time=0.041..0.093 *rows=2* loops=1)`
+* The `LIMIT` is applied within the CTE
+* The CTE result is materialized, it holds only 2 rows: +
+`CTE mysub`
+* The `Nested Loop` is still chosen, however is joining against the CTE (which results are static): +
+`CTE Scan on mysub  (...) (actual time=0.001..0.001 *rows=2* *loops=41*)`
