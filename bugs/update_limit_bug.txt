@@ -41,3 +41,5 @@ EXPLAIN (ANALYZE)
                                  ->  Seq Scan on buganalysis buganalysis_1  (cost=0.00..1.01 rows=1 width=18) (actual time=0.003..0.005 rows=5 loops=1)
                                        Filter: ((id % 2) = 0)
                                        Rows Removed by Filter: 6
+
+

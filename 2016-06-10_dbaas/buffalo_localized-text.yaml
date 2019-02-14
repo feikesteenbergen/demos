@@ -1,0 +1,289 @@
+
+# basic information for generating and executing this definition
+SenzaInfo:
+  StackName: spilo
+  Tags:
+    - SpiloCluster: "{{Arguments.version}}"
+
+# a list of senza components to apply to the definition
+SenzaComponents:
+
+  # this basic configuration is required for the other components
+  - Configuration:
+      Type: Senza::StupsAutoConfiguration # auto-detect network setup
+
+  # will create a launch configuration and auto scaling group with scaling triggers
+  - AppServer:
+      Type: Senza::TaupageAutoScalingGroup
+      AutoScaling:
+        Minimum: 3
+        Maximum: 3
+        MetricType: CPU
+      InstanceType: m4.large
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvdk
+          Ebs:
+            VolumeSize: 50
+            VolumeType: gp2
+      ElasticLoadBalancer:
+        - PostgresLoadBalancer
+        - PostgresReplicaLoadBalancer
+      HealthCheckType: EC2
+      SecurityGroups:
+        - Fn::GetAtt:
+          - SpiloMemberSG
+          - GroupId
+      IamRoles:
+        - Ref: PostgresAccessRole
+      AssociatePublicIpAddress: false # change for standalone deployment in default VPC
+      TaupageConfig:
+        runtime: Docker
+        source: registry.opensource.zalan.do/acid/spilo-9.5:0.90-p7
+        ports:
+          5432: 5432
+          8008: 8008
+        etcd_discovery_domain: "central.db.zalan.do"
+        environment:
+          SCOPE: "{{Arguments.version}}"
+          ETCD_DISCOVERY_DOMAIN: "central.db.zalan.do"
+          WAL_S3_BUCKET: "zalando-db-eu-central-1-spilo-dbaas"
+          PGPASSWORD_SUPERUSER: "aws:kms:CiB1xhJ4l1CuIItopry6oBQMTabwKcDSi1kyXiwX/IPeEBLLAQEBAgB4dcYSeJdQriCLaKa8uqAUDE2m8CnA0otZMl4sF/yD3hAAAACiMIGfBgkqhkiG9w0BBwaggZEwgY4CAQAwgYgGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQM0R7FZcQ7CJLRSFbUAgEQgFvxDUG3OPsMN3F2ldh6kcNlN5L3BQ4j927MTJ7IQEmHG1eNDzUAJ+nAu5Us6YJpbyCy6WeNKazE+p0meoDg+Jj2XVq/WikzN1g+WGDdMLoQqlo6TgnwNCZi9/4+"
+          PGPASSWORD_ADMIN: "aws:kms:CiB1xhJ4l1CuIItopry6oBQMTabwKcDSi1kyXiwX/IPeEBLLAQEBAgB4dcYSeJdQriCLaKa8uqAUDE2m8CnA0otZMl4sF/yD3hAAAACiMIGfBgkqhkiG9w0BBwaggZEwgY4CAQAwgYgGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQM2km9T9hu5TXLnE7eAgEQgFvpywT6nFlbvbOLH8a3vLQg1Gvsr+tmN5G18DuBdwS/7yoCAXcXM3N4GRD49VSd49Hk5vKeQXaz8bvrNIiDC/0l7xS6XN9lxMz34LA5cW264+8cUAFUZ8g1NTJQ"
+          PGPASSWORD_STANDBY: "aws:kms:CiB1xhJ4l1CuIItopry6oBQMTabwKcDSi1kyXiwX/IPeEBLLAQEBAgB4dcYSeJdQriCLaKa8uqAUDE2m8CnA0otZMl4sF/yD3hAAAACiMIGfBgkqhkiG9w0BBwaggZEwgY4CAQAwgYgGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQMQwquyzH3kytuJ8OkAgEQgFvKrotsPPPGogKRNOQU6zvsYyvCRiQh0otvlOt8ab+L9DHJLiQxIbgjYgbhnLVqmAOZqp99XZ2yanbbFq1NLjSRL7GGRoIOOC2G2yiyj03pF3NIHM9OymzyX//a"
+          BACKUP_SCHEDULE: "00 01 * * *"
+          LDAP_URL: ldaps://corp-ldap.auth.zalando.com:636/ou=people,dc=zalan,dc=do
+          PATRONI_CONFIGURATION: | ## https://github.com/zalando/patroni#yaml-configuration
+            postgresql:
+                pg_hba:
+                    - hostnossl all all all reject
+                    - hostssl   all +zalandos all ldap ldapserver="localhost" ldapprefix="uid=" ldapsuffix=",ou=people,dc=zalan,dc=do"
+                    - hostssl   all all all md5
+                parameters:
+                  max_connections: 600
+        root: True
+        sysctl:
+          vm.overcommit_memory: 2
+          vm.overcommit_ratio: 60
+          vm.dirty_ratio: 8
+          vm.dirty_background_ratio: 1
+          vm.swappiness: 1
+        mounts:
+          /home/postgres/pgdata:
+            partition: /dev/xvdk
+            filesystem: ext4
+            erase_on_boot: true
+            options: noatime,nodiratime,nobarrier
+        scalyr_account_key: "aws:kms:CiB1xhJ4l1CuIItopry6oBQMTabwKcDSi1kyXiwX/IPeEBK1AQEBAgB4dcYSeJdQriCLaKa8uqAUDE2m8CnA0otZMl4sF/yD3hAAAACMMIGJBgkqhkiG9w0BBwagfDB6AgEAMHUGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQMtVjNdzSYjAc8ORq/AgEQgEgrHpEriXbmoiOZgod57cawynVrLmBFFToGNU63duvo5TyWxZVMZVnXV4cxnEl3M/EWshFrzeRMlhXwm1I4AxKFy3SlHzd8MYM="
+Resources:
+  PostgresReplicaRoute53Record:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Type: CNAME
+      TTL: 20
+      HostedZoneName: db.zalan.do.
+      Name: localized-texts-repl.buffalo-dev.db.zalan.do
+      ResourceRecords:
+        - Fn::GetAtt:
+           - PostgresReplicaLoadBalancer
+           - DNSName
+  PostgresReplicaLoadBalancer:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      CrossZone: true
+      HealthCheck:
+        HealthyThreshold: 2
+        Interval: 5
+        Target: HTTP:8008/replica
+        Timeout: 3
+        UnhealthyThreshold: 2
+      Listeners:
+        - InstancePort: 5432
+          LoadBalancerPort: 5432
+          Protocol: TCP
+      LoadBalancerName: "spilo-{{Arguments.version}}-repl"
+      ConnectionSettings:
+        IdleTimeout: 3600
+      SecurityGroups:
+        - Fn::GetAtt:
+          - SpiloReplicaSG
+          - GroupId
+      Scheme: internet-facing
+      Subnets:
+        Fn::FindInMap:
+          - LoadBalancerSubnets
+          - Ref: AWS::Region
+          - Subnets
+  PostgresRoute53Record:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Type: CNAME
+      TTL: 20
+      HostedZoneName: db.zalan.do.
+      Name: localized-texts.buffalo-dev.db.zalan.do
+      ResourceRecords:
+        - Fn::GetAtt:
+           - PostgresLoadBalancer
+           - DNSName
+  PostgresLoadBalancer:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      CrossZone: true
+      HealthCheck:
+        HealthyThreshold: 2
+        Interval: 5
+        Target: HTTP:8008/master
+        Timeout: 3
+        UnhealthyThreshold: 2
+      Listeners:
+        - InstancePort: 5432
+          LoadBalancerPort: 5432
+          Protocol: TCP
+      LoadBalancerName: "spilo-{{Arguments.version}}"
+      ConnectionSettings:
+        IdleTimeout: 3600
+      SecurityGroups:
+        - Fn::GetAtt:
+          - SpiloMasterSG
+          - GroupId
+      Scheme: internet-facing
+      Subnets:
+        Fn::FindInMap:
+          - LoadBalancerSubnets
+          - Ref: AWS::Region
+          - Subnets
+  PostgresAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ec2.amazonaws.com
+          Action: sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: SpiloEC2S3KMSAccess
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource:
+              - "arn:aws:s3:::zalando-db-eu-central-1-spilo-dbaas"
+              - "arn:aws:s3:::zalando-db-eu-central-1-spilo-dbaas/*"
+          - Effect: Allow
+            Action:
+              - s3:*
+            Resource:
+              - "arn:aws:s3:::zalando-db-eu-central-1-spilo-dbaas/spilo/{{Arguments.version}}/*"
+          - Effect: Allow
+            Action: ec2:CreateTags
+            Resource: "*"
+          - Effect: Allow
+            Action: ec2:Describe*
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - "kms:Decrypt"
+              - "kms:Encrypt"
+            Resource:
+              - arn:aws:kms:eu-central-1:346791442234:key/7d758052-8726-4342-915f-35eb0c20ec02
+  SpiloMasterSG:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Security Group for the master ELB of Spilo: {{Arguments.version}}"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 52.29.137.133/32
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 52.58.114.11/32
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 52.28.94.178/32
+  SpiloReplicaSG:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Security Group for the replica ELB of Spilo: {{Arguments.version}}"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 52.29.137.133/32
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 52.58.114.11/32
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 52.28.94.178/32
+  SpiloMemberSG:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Security Group for members of Spilo: {{Arguments.version}}"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId:
+            Fn::GetAtt:
+              - SpiloMasterSG
+              - GroupId
+        - IpProtocol: tcp
+          FromPort: 8008
+          ToPort: 8008
+          SourceSecurityGroupId:
+            Fn::GetAtt:
+              - SpiloMasterSG
+              - GroupId
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId:
+            Fn::GetAtt:
+              - SpiloReplicaSG
+              - GroupId
+        - IpProtocol: tcp
+          FromPort: 8008
+          ToPort: 8008
+          SourceSecurityGroupId:
+            Fn::GetAtt:
+              - SpiloReplicaSG
+              - GroupId
+        - IpProtocol: tcp
+          FromPort: 9100
+          ToPort: 9100
+          SourceSecurityGroupId: "sg-4578642c"
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: "sg-4578642c"
+        - IpProtocol: tcp
+          FromPort: 8008
+          ToPort: 8008
+          SourceSecurityGroupId: "sg-4578642c"
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          SourceSecurityGroupId: "sg-99ecd3f0"
+  SpiloMemberIngressMembers:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId:
+        Fn::GetAtt:
+          - SpiloMemberSG
+          - GroupId
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+          - SpiloMemberSG
+          - GroupId

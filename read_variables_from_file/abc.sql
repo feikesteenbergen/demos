@@ -75,7 +75,7 @@ SELECT CASE
 \gset
 
 -- Warn windows users about the warning they will receive
-SELECT 'You will receive a warning about ''cat'' not existing. You can ignore this warning' AS warnings
+SELECT 'You will receive a warning about ''cat'' not existing. You can ignore this warning'
  WHERE :'nulldevice' = 'NUL';
 
 -- Disable output, as not to clutter the console output
@@ -84,7 +84,7 @@ SELECT 'You will receive a warning about ''cat'' not existing. You can ignore th
 -- we set an environment variable with the file name
 \setenv PSQLLOADFILE :variables_source
 -- Load the full file into a variable
-- We use the logical || to be able to be run on Windowish and Linux-like OS'es
+-- We use the logical || to be able to be run on Windowish and Linux-like OS'es
 \set filecontents `cat "${PSQLLOADFILE}" || type "%PSQLLOADFILE%"`
 -- We could use a CSV parser at this stage, this is a poor solution relying on comma's only used as seperators
 SELECT format('(VALUES (%s))',

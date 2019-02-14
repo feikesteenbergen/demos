@@ -1,0 +1,4 @@
+hostssl all +acid md5
+hostssl all +zalandos ... ldap
+hostssl all +robot md5
+hostssl all reject
